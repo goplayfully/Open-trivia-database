@@ -1,5 +1,6 @@
 import json
 import sys
+import random
 import logging
 import vertexai
 from itertools import islice
@@ -12,8 +13,8 @@ from firebase_admin import firestore
 # Use the application default credentials.
 cred = credentials.ApplicationDefault()
 if not firebase_admin._apps:
-  firebase_admin.initialize_app(cred)
-  database_handle = firestore.client()
+    firebase_admin.initialize_app(cred)
+    database_handle = firestore.client()
 
 
 VERTEX_STORY_MODEL = "chat-bison@001"
@@ -60,19 +61,19 @@ def main():
     # Set up Vertex/PaLM
     chat_model = ChatModel.from_pretrained(VERTEX_STORY_MODEL)
     parameters = {
-      "temperature": 0.2,
-      "max_output_tokens": 1024,
+        "temperature": 0.2,
+        "max_output_tokens": 1024,
     }
     chat = chat_model.start_chat(
         context="You are a code editor for a set of trivia questions stored as JSON objects. Please fix the following trivia questions.",
         examples=[
             InputOutputTextPair(
-              input_text="""{"category_id":"SCIENCE_AND_NATURE", "lang":"en", "tags":[], "question":"The phrase "Homo sapiens " means ____", "answer":0, "answers":["Man of knowledge"], "source":""},""",
-              output_text="""{"category_id":"SCIENCE_AND_NATURE", "lang":"en", "tags":[], "question":"The phrase \"Homo sapiens\" means ____", "answer":0, "answers":["Man of knowledge", "Man of science", "Man who thinks", "Man of steel"], "source":""},""",
+                input_text="""{"category_id":"SCIENCE_AND_NATURE", "lang":"en", "tags":[], "question":"The phrase "Homo sapiens " means ____", "answer":0, "answers":["Man of knowledge"], "source":""},""",
+                output_text="""{"category_id":"SCIENCE_AND_NATURE", "lang":"en", "tags":[], "question":"The phrase \"Homo sapiens\" means ____", "answer":0, "answers":["Man of knowledge", "Man of science", "Man who thinks", "Man of steel"], "source":""},""",
             ),
             InputOutputTextPair(
-              input_text="""{"category_id":"SCIENCE_AND_NATURE", "lang":"en", "tags":["SCIENCE_AND_NATURE"], "question":"__________ and short_tailed shrews get by on only two hours of sleep a day.", "answer":0, "answers":["Elephants"], "source":""}""",
-              output_text="""{"category_id":"SCIENCE_AND_NATURE", "lang":"en", "tags":["SCIENCE_AND_NATURE"], "question":"__________ and short_tailed shrews get by on only two hours of sleep a day.", "answer":0, "answers":["Elephants", "Horses", "Hippos", "Voles"], "source":""}""",
+                input_text="""{"category_id":"SCIENCE_AND_NATURE", "lang":"en", "tags":["SCIENCE_AND_NATURE"], "question":"__________ and short_tailed shrews get by on only two hours of sleep a day.", "answer":0, "answers":["Elephants"], "source":""}""",
+                output_text="""{"category_id":"SCIENCE_AND_NATURE", "lang":"en", "tags":["SCIENCE_AND_NATURE"], "question":"__________ and short_tailed shrews get by on only two hours of sleep a day.", "answer":0, "answers":["Elephants", "Horses", "Hippos", "Voles"], "source":""}""",
             )
         ],
     )
@@ -92,6 +93,8 @@ def main():
     BATCH_SIZE = 10
     lines = 0
 
+    doc_ref = database_handle.collection("trivia")
+
     with open(filename) as file:
         # skip first line
         next_n_lines = list(islice(file, 1))
@@ -103,15 +106,25 @@ def main():
                 break
             next_n_lines
             for line in next_n_lines:
-              input_lines = input_lines + line
+                input_lines = input_lines + line
 
             response = chat.send_message(
-              prompt_template + input_lines,
-              **parameters)
-            logging.info(f"Response from Model: {response.text}")
+                prompt_template + input_lines,
+                **parameters)
+            # logging.info(f"Response from Model: {response.text}")
             out_file.write(response.text + "\n")
-            # if lines > 20:
-            #     break
+
+            # write to DB
+            for response_line in response.text.splitlines():
+                try:
+                    logging.info("Adding line to database: '%s'", response_line[:-1])
+                    question_obj = json.loads(response_line[:-1])
+                    question_obj["random"] = int(random.getrandbits(32))
+                    doc_ref.add(question_obj)
+                except json.JSONDecodeError:
+                    logging.error("Could not parse line '%s'", response_line)
+            if lines > 100:
+                break
     out_file.close()
 
     # Then please add plausible but wrong answers to the `answers` array, such that answer[0] is the correct one. Finally, p
