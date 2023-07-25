@@ -2,6 +2,8 @@ import json
 import sys
 import random
 import logging
+import coloredlogs
+import hashlib
 import vertexai
 from itertools import islice
 from vertexai.preview.language_models import ChatModel, InputOutputTextPair
@@ -21,6 +23,8 @@ VERTEX_STORY_MODEL = "chat-bison@001"
 # OPENAI_MODEL="gpt-4-0613"
 OPENAI_TEMPERATURE = 0.2
 
+logger = logging.getLogger(__name__)
+coloredlogs.install(level='DEBUG')
 
 def read_lines(filename):
     """Reads the contents of a file and returns a list of lines.
@@ -82,14 +86,14 @@ def main():
         the following steps:
         1) Inside the "question" element, escape all
         unescaped or duplicated quotation marks with a \ character so the line is valid JSON
-        2) Fix unnecessary title casing
+        2) Fix unnecessary title casing and unnecessary _ characters
         3) Remove unncessary spaces near quotation marks
         4) Add three plausible, unique, wrong entries to the `answers` array
         5) Please format the output to a single line without indentation or newlines."""
 
     filename = sys.argv[1]
-    out_file = open("augmented.out", "a")
-    input_lines = ""
+    out_file = open("augmented.json", "a")
+    problem_file = open("problems.json", "a")
     BATCH_SIZE = 10
     lines = 0
 
@@ -99,33 +103,69 @@ def main():
         # skip first line
         next_n_lines = list(islice(file, 1))
         while True:
-            logging.info("Processing a batch starting at %s...", lines)
+            logger.info("Processing a batch starting at %s...", lines)
             lines = lines + BATCH_SIZE
             next_n_lines = list(islice(file, BATCH_SIZE))
             if not next_n_lines:
                 break
-            next_n_lines
+
+            # create a concatenated string
+            input_lines = ""
             for line in next_n_lines:
                 input_lines = input_lines + line
+
+            logger.info('Submitting to model: input %s', input_lines)
 
             response = chat.send_message(
                 prompt_template + input_lines,
                 **parameters)
-            # logging.info(f"Response from Model: {response.text}")
+            logger.info(f"Response from Model: {response.text}")
             out_file.write(response.text + "\n")
 
             # write to DB
             for response_line in response.text.splitlines():
+                trimmed_line = response_line
                 try:
-                    logging.info("Adding line to database: '%s'", response_line[:-1])
-                    question_obj = json.loads(response_line[:-1])
-                    question_obj["random"] = int(random.getrandbits(32))
-                    doc_ref.add(question_obj)
-                except json.JSONDecodeError:
-                    logging.error("Could not parse line '%s'", response_line)
+                    # chomp the trailing , so we can parse this individually
+                    if trimmed_line[-1] == ',':
+                        trimmed_line = trimmed_line[:-1]
+                    question_obj = json.loads(trimmed_line)
+                except json.JSONDecodeError as err:
+                    logger.error(
+                        "Could not parse line '%s', %s @ %s",
+                        response_line,
+                        err.msg,
+                        err.pos)
+                    problem_file.write(response_line + "\n")
+
+                question_obj["random_1"] = int(random.getrandbits(32))
+                question_obj["random_2"] = int(random.getrandbits(32))
+                question_obj["random_3"] = int(random.getrandbits(32))
+                question_obj["correct_answer"] = question_obj["answers"][0]
+
+                question_key = hashlib.sha1(
+                    question_obj["question"].encode("utf-8")).hexdigest()
+                if doc_ref.document(question_key).get().exists:
+                    logger.info(
+                        'Already found entry with key %s',
+                        question_key)
+                    continue
+                logger.info(
+                    "Adding line to database: '%s'",
+                    response_line[:-1])
+                question_obj["content_id"] = question_key
+
+                # remove "answer" key, which was a complicated array index
+                try:
+                    question_obj.pop("answer")
+                except (KeyError):
+                    # ignore
+                    logger.debug('question had no "answer" field')
+                doc_ref.document(question_key).set(question_obj)
             if lines > 100:
                 break
     out_file.close()
+    problem_file.close()
 
     # Then please add plausible but wrong answers to the `answers` array, such that answer[0] is the correct one. Finally, p
     # for line in lines:
