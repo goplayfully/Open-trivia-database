@@ -89,7 +89,9 @@ def main():
         2) Fix unnecessary title casing and unnecessary _ characters
         3) Remove unncessary spaces near quotation marks
         4) Add three plausible, unique, wrong entries to the `answers` array
-        5) Please format the output to a single line without indentation or newlines."""
+        5) Ensure that the "question" is a valid question (and doesn't give away
+        the answer)
+        6) Please format the output to a single line without indentation or newlines."""
 
     filename = sys.argv[1]
     out_file = open("augmented.json", "a")
@@ -141,8 +143,19 @@ def main():
                 question_obj["random_1"] = int(random.getrandbits(32))
                 question_obj["random_2"] = int(random.getrandbits(32))
                 question_obj["random_3"] = int(random.getrandbits(32))
-                question_obj["correct_answer"] = question_obj["answers"][0]
+                try:
+                    question_obj["correct_answer"] = question_obj["answers"][0]
+                except KeyError as err:
+                    logger.error("Missing answer in question %s (%s)",
+                                 trimmed_line, err)
+                    problem_file.write(response_line + "\n")
 
+                # TODO(mrisher): This hashes based on the post-LLM topic
+                # so potentially we already have an essentially identical
+                # question in the db. In the future, maybe we should hash
+                # based on the raw input question (from the json file)
+                # but then we would need to map the input to output to
+                # get the key
                 question_key = hashlib.sha1(
                     question_obj["question"].encode("utf-8")).hexdigest()
                 if doc_ref.document(question_key).get().exists:
@@ -162,7 +175,9 @@ def main():
                     # ignore
                     logger.debug('question had no "answer" field')
                 doc_ref.document(question_key).set(question_obj)
-            if lines > 100:
+
+            # early exit
+            if lines > 1000:
                 break
     out_file.close()
     problem_file.close()
