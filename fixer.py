@@ -4,6 +4,7 @@ import random
 import logging
 import coloredlogs
 import hashlib
+import argparse
 import vertexai
 from itertools import islice
 from vertexai.preview.language_models import ChatModel, InputOutputTextPair
@@ -61,6 +62,19 @@ def main():
     fix formatting problems and add multiple-choice answers'''
 
     logging.basicConfig(level=logging.DEBUG)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("filename", help="The trivia question JSON list")
+    parser.add_argument(
+        "--nodb",
+        help="Don't write to the database",
+        action="store_true",
+        )
+    parser.add_argument(
+        "--limit",
+        help="The max number of rows to parse",
+        default=10,
+    )
+    args = parser.parse_args()
 
     # Set up Vertex/PaLM
     chat_model = ChatModel.from_pretrained(VERTEX_STORY_MODEL)
@@ -73,11 +87,11 @@ def main():
         examples=[
             InputOutputTextPair(
                 input_text="""{"category_id":"SCIENCE_AND_NATURE", "lang":"en", "tags":[], "question":"The phrase "Homo sapiens " means ____", "answer":0, "answers":["Man of knowledge"], "source":""},""",
-                output_text="""{"category_id":"SCIENCE_AND_NATURE", "lang":"en", "tags":[], "question":"The phrase \"Homo sapiens\" means ____", "answer":0, "answers":["Man of knowledge", "Man of science", "Man who thinks", "Man of steel"], "source":""},""",
+                output_text="""{"category_id":"SCIENCE_AND_NATURE", "lang":"en", "tags":[], "question":"The phrase \"Homo sapiens\" means ____", "answer":0, "answers":["Man of knowledge", "Man of science", "Man who thinks", "Man of steel"], "source":"", "explanation":"The phrase \"Homo sapiens\" was first coined by Carl Linnaeus in 1758, a Swedish biologist who created the Latin binomial nomenclature"},""",
             ),
             InputOutputTextPair(
                 input_text="""{"category_id":"SCIENCE_AND_NATURE", "lang":"en", "tags":["SCIENCE_AND_NATURE"], "question":"__________ and short_tailed shrews get by on only two hours of sleep a day.", "answer":0, "answers":["Elephants"], "source":""}""",
-                output_text="""{"category_id":"SCIENCE_AND_NATURE", "lang":"en", "tags":["SCIENCE_AND_NATURE"], "question":"__________ and short_tailed shrews get by on only two hours of sleep a day.", "answer":0, "answers":["Elephants", "Horses", "Hippos", "Voles"], "source":""}""",
+                output_text="""{"category_id":"SCIENCE_AND_NATURE", "lang":"en", "tags":["SCIENCE_AND_NATURE"], "question":"__________ and short tailed shrews get by on only two hours of sleep a day.", "answer":0, "answers":["Elephants", "Horses", "Hippos", "Voles"], "source":"", "explanation":"Elephants are the shortest sleeping mammal, and only dream every three to four days"}""",
             )
         ],
     )
@@ -91,11 +105,14 @@ def main():
         4) Add three plausible, unique, wrong entries to the `answers` array
         5) Ensure that the "question" is a valid question (and doesn't give away
         the answer)
-        6) Please format the output to a single line without indentation or newlines."""
+        6) Please format the output to a single line without indentation or newlines.
 
-    filename = sys.argv[1]
-    out_file = open("augmented.json", "a")
-    problem_file = open("problems.json", "a")
+        INPUT:
+        """
+
+    filename = args.filename
+    out_file = open(filename + ".out", "a")
+    problem_file = open(filename + ".problems", "a")
     BATCH_SIZE = 10
     lines = 0
 
@@ -116,7 +133,8 @@ def main():
             for line in next_n_lines:
                 input_lines = input_lines + line
 
-            logger.info('Submitting to model: input %s', input_lines)
+            logger.info('Submitting to model: input %s',
+                        input_lines)
 
             response = chat.send_message(
                 prompt_template + input_lines,
@@ -174,10 +192,13 @@ def main():
                 except (KeyError):
                     # ignore
                     logger.debug('question had no "answer" field')
-                doc_ref.document(question_key).set(question_obj)
+
+                # save to database
+                if not args.nodb:
+                    doc_ref.document(question_key).set(question_obj)
 
             # early exit
-            if lines > 1000:
+            if lines >= args.limit:
                 break
     out_file.close()
     problem_file.close()
