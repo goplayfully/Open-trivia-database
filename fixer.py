@@ -107,31 +107,50 @@ def check_and_fix_question(question_dict):
             context="You are an editor and producer for a trivia gameshow. Please rate and respond to the following trivia questions.",
             examples=[
                 InputOutputTextPair(
-                    input_text="""The phrase \"Homo sapiens\" means ____""",
-                    output_text="""{"humor": "low", "age_level": "teen", "accuracy": "true"}""",
+                    input_text="""The phrase \"Homo sapiens\" means ____. ANSWERS: [Man who thinks, Man of steel, Man of wisdom, Man of Saturn]. CORRECT ANSWER: Man who thinks.""",
+                    output_text="""{"problems": [], "humor": "low", "difficulty": "low"}""",
                 ),
                 InputOutputTextPair(
-                    input_text="""__________ and short_tailed shrews get by on only two hours of sleep a day.""",
-                    output_text="""{"humor": "low", "age_level": "adult", "accuracy": "true"}""",
+                    input_text="""__________ and short_tailed shrews get by on only two hours of sleep a day. ANSWERS: [Elephants, Mice, Gerbils, Giraffes]. CORRECT ANSWER: Elephants""",
+                    output_text="""{"problems": [], "humor": "low", "difficulty": "medium"}""",
                 ),
                 InputOutputTextPair(
-                    input_text="""Elephants and short_tailed shrews get by on only two hours of sleep a day.""",
-                    output_text="""{"problem": "input is not a question"}""",
+                    input_text="""__________ and short_tailed shrews get by on only two hours of sleep a day. ANSWERS: [Elephants, Large Elephants, Gerbils, Giraffes]. CORRECT ANSWER: Elephants""",
+                    output_text="""{"problems": ["Elephants and 'Large Elephants' are too similar, and both could be considered correct"], "humor": "low", "difficulty": "medium"}""",
                 ),
                 InputOutputTextPair(
-                    input_text="""Alligators and ________ have something in common, at least auditorily. They can hear notes only up to 4,000 vibrations a second.""",
-                    output_text="""{"humor": "medium", "age_level": "teen", "accuracy": "true"}""",
+                    input_text="""Elephants and short_tailed shrews get by on only two hours of sleep a day. ANSWERS: [Elephants, Mice, Gerbils, Giraffes]. CORRECT ANSWER: Elephants""",
+                    output_text="""{"problems": ["input is not a question"]}""",
+                ),
+                InputOutputTextPair(
+                    input_text="""Alligators and frogs can hear notes only up to ____ vibrations a second. ANSWERS: [4000, 5000, 3000, 2000]. CORRECT ANSWER: 4000""",
+                    output_text="""{"problems": ["Answers are too precise. Better answers would be further apart, like 4000, 20000, 100, 40000."], humor": "low", "difficulty": "high"}""",
                 ),
             ],
         )
         try:
             response = chat.send_message(
-                """Review the following question and return a JSON object score it for humor (low/medium/high),
-                age_level (youth/teen/adult), and accuracy (a description of any problems with the question):\n\n"""
-                + question_dict["question"],
+                f"""Review the following question and return a JSON object
+                listing any problems, then
+                score it for humor (low/medium/high) and
+                difficulty (low/medium/high).
+                A question has a PROBLEM
+                if the correct answer is not correct, if the answers are too
+                similar, or if the answers are overly quantitative.
+                DIFFICULTY is based on how many people would know the answer
+                (high = more than 50%, medium = 25%, low = below 25%) based
+                on how often the topic is discussed online.
+
+                INPUT
+                ---
+                QUESTION: {question_dict["question"]}
+                ANSWERS: {question_dict["answers"]}
+                CORRECT ANSWER: {question_dict["correct_answer"]}
+                ---
+                """,
                 **parameters)
-        except google.api_core.exceptions.ResourceExhausted as err:
-            logger.warning('Error from VertexAI (sleeping): %s', err)
+        except:
+            logger.warning('Error from VertexAI (sleeping): %s')
             time.sleep(5)
         if "false" in response.text:
             logger.warning('Found problem with question %s', question_dict['content_id'])
@@ -143,22 +162,42 @@ def check_and_fix_question(question_dict):
             return
         output_obj['timestamp'] = firestore.SERVER_TIMESTAMP
         output_obj['question'] = question_dict['question']
+        if len(output_obj['problems']) > 0:
+            (database_handle
+            .collection("trivia_feedback")
+            .document("fixer.py-problems")
+            .set({
+                question_dict['content_id']: output_obj,
+            }, merge=True))
+        else:
+            (database_handle
+            .collection("trivia_feedback")
+            .document("fixer.py-good")
+            .set({
+                question_dict['content_id']: output_obj,
+            }, merge=True))
         (database_handle
-         .collection("trivia_feedback")
-         .document("fixer.py robot")
-         .set({
-             question_dict['content_id']: output_obj,
-         }, merge=True))
+            .collection("trivia")
+            .document(question_dict["content_id"])
+            .update({
+                'question': question_dict["question"],
+                'robo_reviewed': True}))
 
 
-def trivia_check():
+def trivia_check(category):
     """Check each entry in the database for correctness"""
     questions = (database_handle
-                 .collection("trivia")
+                 .collection("trivia"))
+    if category != "":
+        questions = questions.where(
+            filter=FieldFilter("category_id", "==", category))
+
+    questions = questions.stream()
+
                  # .where(
                  #       filter=FieldFilter("proofed", "!=", True))
                  # .limit(50)
-                 .stream())
+
     for question in questions:
         question_dict = question.to_dict()
         logging.debug('Checking question %s', question_dict["content_id"])
@@ -167,6 +206,11 @@ def trivia_check():
             continue
         check_and_fix_question(question_dict)
 
+    if category != "":
+        logger.info('category set; skipping user feedback')
+        return
+
+    logger.info('Moving to user feedback')
     users = (database_handle
                  .collection("trivia_feedback")
                  .stream())
@@ -217,6 +261,12 @@ def main():
         default="trivia"
     )
     parser.add_argument(
+        "--category",
+        help="Which category to check",
+        default="",
+        type=str,
+    )
+    parser.add_argument(
         "--skip",
         help="Number of rows to skip, for resuming previous task",
         default=0,
@@ -232,7 +282,7 @@ def main():
     if args.mode == "trash" or args.mode == "congrats":
         return banter(filename, args.mode)
     elif args.mode == "trivia_check":
-        return trivia_check()
+        return trivia_check(args.category)
 
     pathless_filename = os.path.basename(filename)
     out_file = open(pathless_filename + ".out", "a")
